@@ -1,0 +1,3 @@
+[submodule "sylvester-flows"]
+	path = sylvester-flows
+	url = https://github.com/riannevdberg/sylvester-flows
