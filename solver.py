@@ -14,6 +14,12 @@ from ops import recon_loss, kl_divergence, permute_dims
 from model import FactorVAE1, FactorVAE2, Discriminator
 from dataset import return_data
 
+import models.VAE as sVAE
+
+# todo: remove this
+class NamespaceHack:
+    def __init__(self, **predict):
+        self.__dict__.update(predict)
 
 class Solver(object):
     def __init__(self, args):
@@ -45,7 +51,14 @@ class Solver(object):
         self.beta2_D = args.beta2_D
 
         if args.dataset == 'dsprites':
-            self.VAE = FactorVAE1(self.z_dim).to(self.device)
+            arg = NamespaceHack(
+                z_size=self.z_dim,
+                input_size=[self.batch_size, 64, 64],
+                input_type='binary',
+                num_flows=4
+            )
+            self.VAE = sVAE.TriangularSylvesterVAE(arg).to(self.device)
+            # self.VAE = FactorVAE1(self.z_dim).to(self.device)
             self.nc = 1
         else:
             self.VAE = FactorVAE2(self.z_dim).to(self.device)
