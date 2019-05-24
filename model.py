@@ -3,6 +3,9 @@
 import torch.nn as nn
 import torch.nn.init as init
 
+import models.VAE as sVAE
+from models.layers import GatedConv2d, GatedConvTranspose2d
+
 
 class Discriminator(nn.Module):
     def __init__(self, z_dim):
@@ -37,8 +40,99 @@ class Discriminator(nn.Module):
         return self.net(z).squeeze()
 
 
+class SylvesterFactorVAE1(sVAE.TriangularSylvesterVAE):
+    """Encoder and Decoder architecture for 2D Shapes data."""
+
+    def __init__(self, args):
+        super(sVAE.TriangularSylvesterVAE, self).__init__(self, args)
+        # self.z_dim = z_dim
+
+    def create_encoder(self):
+        """
+        Helper function to create the elemental blocks for the encoder. Creates a gated convnet encoder.
+        the encoder expects data as input of shape (batch_size, num_channels, width, height).
+        """
+
+        q_z_nn = nn.Sequential(
+            GatedConv2d(self.input_size[0], 32, 5, 1, 2),
+            GatedConv2d(32, 32, 5, 2, 2),
+            GatedConv2d(32, 64, 5, 1, 2),
+            GatedConv2d(64, 64, 5, 2, 2),
+            GatedConv2d(64, 64, 5, 1, 2),
+            GatedConv2d(64, 256, self.last_kernel_size, 1, 0),
+        )
+        q_z_mean = nn.Linear(256, self.z_size)
+        q_z_var = nn.Sequential(
+            nn.Linear(256, self.z_size),
+            nn.Softplus(),
+        )
+
+        return q_z_nn, q_z_mean, q_z_var
+
+    def create_decoder(self):
+        '''
+        p_x_nn = nn.Sequential(
+                GatedConvTranspose2d(self.z_size, 64, self.last_kernel_size, 1, 0),
+                GatedConvTranspose2d(64, 64, 5, 1, 2),
+                GatedConvTranspose2d(64, 32, 5, 2, 2, 1),
+                GatedConvTranspose2d(32, 32, 5, 1, 2),
+                GatedConvTranspose2d(32, 32, 5, 2, 2, 1),
+                GatedConvTranspose2d(32, 32, 5, 1, 2)
+            )
+        '''
+        p_x_nn = nn.Sequential(
+            nn.Conv2d(z_dim, 128, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(128, 64, 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, 64, 4, 2, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, 32, 4, 2, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(32, 32, 4, 2, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(32, 1, 4, 2, 1),
+        )
+        p_x_mean = nn.Sequential(
+            nn.Conv2d(32, self.input_size[0], 1, 1, 0),
+            nn.Sigmoid()
+        )
+        return p_x_nn, p_x_mean
+
+        '''
+        self.encode = nn.Sequential(
+            nn.Conv2d(1, 32, 4, 2, 1),
+            nn.ReLU(True),
+            nn.Conv2d(32, 32, 4, 2, 1),
+            nn.ReLU(True),
+            nn.Conv2d(32, 64, 4, 2, 1),
+            nn.ReLU(True),
+            nn.Conv2d(64, 64, 4, 2, 1),
+            nn.ReLU(True),
+            nn.Conv2d(64, 128, 4, 1),
+            nn.ReLU(True),
+            nn.Conv2d(128, 2*z_dim, 1)
+        )
+        self.decode = nn.Sequential(
+            nn.Conv2d(z_dim, 128, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(128, 64, 4),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, 64, 4, 2, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(64, 32, 4, 2, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(32, 32, 4, 2, 1),
+            nn.ReLU(True),
+            nn.ConvTranspose2d(32, 1, 4, 2, 1),
+        )
+        self.weight_init()
+        '''
+
+
 class FactorVAE1(nn.Module):
     """Encoder and Decoder architecture for 2D Shapes data."""
+
     def __init__(self, z_dim=10):
         super(FactorVAE1, self).__init__()
         self.z_dim = z_dim
@@ -100,6 +194,7 @@ class FactorVAE1(nn.Module):
 
 class FactorVAE2(nn.Module):
     """Encoder and Decoder architecture for 3D Shapes, Celeba, Chairs data."""
+
     def __init__(self, z_dim=10):
         super(FactorVAE2, self).__init__()
         self.z_dim = z_dim
@@ -161,6 +256,7 @@ class FactorVAE2(nn.Module):
 
 class FactorVAE3(nn.Module):
     """Encoder and Decoder architecture for 3D Faces data."""
+
     def __init__(self, z_dim=10):
         super(FactorVAE3, self).__init__()
         self.z_dim = z_dim
