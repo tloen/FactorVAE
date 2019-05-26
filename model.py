@@ -1,6 +1,8 @@
 """model.py"""
 
 from torch.autograd import Variable
+from sylvester_models import flows
+
 import torch.cuda as cuda
 import torch.nn as nn
 import torch.nn.init as init
@@ -38,7 +40,6 @@ class Discriminator(nn.Module):
     def forward(self, z):
         return self.net(z).squeeze()
 
-
 class SylvesterableVAE1(nn.Module):
     """
     64x64 variant of the VAE class in Sylvester flows.
@@ -49,9 +50,9 @@ class SylvesterableVAE1(nn.Module):
     [input_type: 'binary']
     [last_kernel_size: 7]
     """
-    def __init__(self, **kwargs):
+    def __init__(self, z_size=10):
         super(SylvesterableVAE1, self).__init__()
-        self.z_size = kwargs['z_size']
+        self.z_size = z_size
         # self.input_size = [1, 64, 64]
 
         # self.last_kernel_size = 7
@@ -225,6 +226,183 @@ class SylvesterableVAE1(nn.Module):
         for block in self._modules:
             for m in self._modules[block]:
                 initializer(m)
+
+class OrthogonalSylvesterVAE1(SylvesterableVAE1):
+    """
+    Variational auto-encoder with orthogonal flows in the encoder.
+    """
+
+    def __init__(self, num_flows=4, num_ortho_vecs=8, z_size=10):
+        super(OrthogonalSylvesterVAE1, self).__init__(z_size=z_size)
+
+        # Initialize log-det-jacobian to zero
+        self.log_det_j = 0.
+
+        # Flow parameters
+        flow = flows.Sylvester
+        self.num_flows = num_flows
+        self.num_ortho_vecs = num_ortho_vecs
+
+        assert (self.num_ortho_vecs <= self.z_size) and (self.num_ortho_vecs > 0)
+
+        # Orthogonalization parameters
+        if self.num_ortho_vecs == self.z_size:
+            self.cond = 1.e-5
+        else:
+            self.cond = 1.e-6
+
+        self.steps = 100
+        identity = torch.eye(self.num_ortho_vecs, self.num_ortho_vecs)
+        # Add batch dimension
+        identity = identity.unsqueeze(0)
+        # Put identity in buffer so that it will be moved to GPU if needed by any call of .cuda
+        self.register_buffer('_eye', Variable(identity))
+        self._eye.requires_grad = False
+
+        # Masks needed for triangular R1 and R2.
+        triu_mask = torch.triu(torch.ones(self.num_ortho_vecs, self.num_ortho_vecs), diagonal=1)
+        triu_mask = triu_mask.unsqueeze(0).unsqueeze(3)
+        diag_idx = torch.arange(0, self.num_ortho_vecs).long()
+
+        self.register_buffer('triu_mask', Variable(triu_mask))
+        self.triu_mask.requires_grad = False
+        self.register_buffer('diag_idx', diag_idx)
+
+        # Amortized flow parameters
+        # Diagonal elements of R1 * R2 have to satisfy -1 < R1 * R2 for flow to be invertible
+        self.diag_activation = nn.Tanh()
+
+        self.amor_d = nn.Linear(self.q_z_nn_output_dim, self.num_flows * self.num_ortho_vecs * self.num_ortho_vecs)
+
+        self.amor_diag1 = nn.Sequential(
+            nn.Linear(self.q_z_nn_output_dim, self.num_flows * self.num_ortho_vecs),
+            self.diag_activation
+        )
+        self.amor_diag2 = nn.Sequential(
+            nn.Linear(self.q_z_nn_output_dim, self.num_flows * self.num_ortho_vecs),
+            self.diag_activation
+        )
+
+        self.amor_q = nn.Linear(self.q_z_nn_output_dim, self.num_flows * self.z_size * self.num_ortho_vecs)
+        self.amor_b = nn.Linear(self.q_z_nn_output_dim, self.num_flows * self.num_ortho_vecs)
+
+        # Normalizing flow layers
+        for k in range(self.num_flows):
+            flow_k = flow(self.num_ortho_vecs)
+            self.add_module('flow_' + str(k), flow_k)
+
+    def batch_construct_orthogonal(self, q):
+        """
+        Batch orthogonal matrix construction.
+        :param q:  q contains batches of matrices, shape : (batch_size * num_flows, z_size * num_ortho_vecs)
+        :return: batches of orthogonalized matrices, shape: (batch_size * num_flows, z_size, num_ortho_vecs)
+        """
+
+        # Reshape to shape (num_flows * batch_size, z_size * num_ortho_vecs)
+        q = q.view(-1, self.z_size * self.num_ortho_vecs)
+
+        norm = torch.norm(q, p=2, dim=1, keepdim=True)
+        amat = torch.div(q, norm)
+        dim0 = amat.size(0)
+        amat = amat.resize(dim0, self.z_size, self.num_ortho_vecs)
+
+        max_norm = 0.
+
+        # Iterative orthogonalization
+        for s in range(self.steps):
+            tmp = torch.bmm(amat.transpose(2, 1), amat)
+            tmp = self._eye - tmp
+            tmp = self._eye + 0.5 * tmp
+            amat = torch.bmm(amat, tmp)
+
+            # Testing for convergence
+            test = torch.bmm(amat.transpose(2, 1), amat) - self._eye
+            norms2 = torch.sum(torch.norm(test, p=2, dim=2) ** 2, dim=1)
+            norms = torch.sqrt(norms2)
+            max_norm = torch.max(norms).data[0]
+            if max_norm <= self.cond:
+                break
+
+        if max_norm > self.cond:
+            print('\nWARNING WARNING WARNING: orthogonalization not complete')
+            print('\t Final max norm =', max_norm)
+
+            print()
+
+        # Reshaping: first dimension is batch_size
+        amat = amat.view(-1, self.num_flows, self.z_size, self.num_ortho_vecs)
+        amat = amat.transpose(0, 1)
+
+        return amat
+
+    def __encode__(self, x):
+        """
+        Encoder that ouputs parameters for base distribution of z and flow parameters.
+        """
+
+        batch_size = x.size(0)
+
+        h = self.q_z_nn(x)
+        h = h.view(-1, self.q_z_nn_output_dim)
+        mean_z = self.q_z_mean(h)
+        var_z = self.q_z_var(h)
+
+        # Amortized r1, r2, q, b for all flows
+
+        full_d = self.amor_d(h)
+        diag1 = self.amor_diag1(h)
+        diag2 = self.amor_diag2(h)
+
+        full_d = full_d.resize(batch_size, self.num_ortho_vecs, self.num_ortho_vecs, self.num_flows)
+        diag1 = diag1.resize(batch_size, self.num_ortho_vecs, self.num_flows)
+        diag2 = diag2.resize(batch_size, self.num_ortho_vecs, self.num_flows)
+
+        r1 = full_d * self.triu_mask
+        r2 = full_d.transpose(2, 1) * self.triu_mask
+
+        r1[:, self.diag_idx, self.diag_idx, :] = diag1
+        r2[:, self.diag_idx, self.diag_idx, :] = diag2
+
+        q = self.amor_q(h)
+        b = self.amor_b(h)
+
+        # Resize flow parameters to divide over K flows
+        b = b.resize(batch_size, 1, self.num_ortho_vecs, self.num_flows)
+
+        return mean_z, var_z, r1, r2, q, b
+
+    def encode(self, x):
+        mean_z, var_z, r1, r2, q, b = self.__encode__(x)
+        return torch.cat(mean_z, var_z, 1)
+
+    def forward(self, x):
+        """
+        Forward pass with orthogonal sylvester flows for the transformation z_0 -> z_1 -> ... -> z_k.
+        Log determinant is computed as log_det_j = N E_q_z0[\sum_k log |det dz_k/dz_k-1| ].
+        """
+
+        self.log_det_j = 0.
+
+        z_mu, z_var, r1, r2, q, b = self.__encode__(x)
+
+        # Orthogonalize all q matrices
+        q_ortho = self.batch_construct_orthogonal(q)
+
+        # Sample z_0
+        z = [self.reparameterize(z_mu, z_var)]
+
+        # Normalizing flows
+        for k in range(self.num_flows):
+
+            flow_k = getattr(self, 'flow_' + str(k))
+            z_k, log_det_jacobian = flow_k(z[k], r1[:, :, :, k], r2[:, :, :, k], q_ortho[k, :, :, :], b[:, :, :, k])
+
+            z.append(z_k)
+            self.log_det_j += log_det_jacobian
+
+        x_mean = self.decode(z[-1])
+
+        return x_mean, z_mu, z_var, self.log_det_j, z[0], z[-1]
 
 class FactorVAE1(nn.Module):
     """Encoder and Decoder architecture for 2D Shapes data."""
