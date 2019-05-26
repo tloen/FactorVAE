@@ -11,7 +11,7 @@ from torchvision.utils import make_grid, save_image
 
 from utils import DataGather, mkdirs, grid2gif
 from ops import recon_loss, kl_divergence, permute_dims
-from model import FactorVAE1, FactorVAE2, Discriminator
+from model import FactorVAE1, FactorVAE2, SylvesterableVAE, Discriminator
 from dataset import return_data
 
 
@@ -45,7 +45,10 @@ class Solver(object):
         self.beta2_D = args.beta2_D
 
         if args.dataset == 'dsprites':
-            self.VAE = FactorVAE1(self.z_dim).to(self.device)
+            if args.sylvester:
+                SylvesterableVAE(z_size=self.z_dim, input_size=)
+            else:
+                self.VAE = FactorVAE1(self.z_dim).to(self.device)
             self.nc = 1
         else:
             self.VAE = FactorVAE2(self.z_dim).to(self.device)
