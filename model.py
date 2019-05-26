@@ -1,5 +1,6 @@
 """model.py"""
 
+from torch.autograd import Variable
 import torch.cuda as cuda
 import torch.nn as nn
 import torch.nn.init as init
@@ -38,7 +39,7 @@ class Discriminator(nn.Module):
         return self.net(z).squeeze()
 
 
-class SylvesterableVAE(nn.Module):
+class SylvesterableVAE1(nn.Module):
     """
     64x64 variant of the VAE class in Sylvester flows.
     command-line args replaced with kwargs.
@@ -49,8 +50,8 @@ class SylvesterableVAE(nn.Module):
     [last_kernel_size: 7]
     """
     def __init__(self, **kwargs):
-        super(BigVAE, self).__init__()
-        self.z_size = kwargs.z_size
+        super(SylvesterableVAE1, self).__init__()
+        self.z_size = kwargs['z_size']
         # self.input_size = [1, 64, 64]
 
         # self.last_kernel_size = 7
@@ -61,12 +62,14 @@ class SylvesterableVAE(nn.Module):
         self.q_z_nn_output_dim = 256
 
         if cuda.is_available():
-            self.FloatTensor = torch.cuda.FloatTensor
+            self.FloatTensor = cuda.FloatTensor
         else:
-            self.FloatTensor = torch.FloatTensor
+            raise NotImplementedError()
+            #self.FloatTensor = torch.FloatTensor
 
         # log-det-jacobian = 0 without flows
         self.log_det_j = Variable(self.FloatTensor(1).zero_())
+        self.weight_init()
     
     def create_encoder(self):
         h_dim = 128
@@ -93,7 +96,9 @@ class SylvesterableVAE(nn.Module):
             GatedConv2d(64, 256, self.last_kernel_size, 1, 0),
         )
         '''
-        q_z_mean = nn.Linear(h_dim, self.z_size)
+        q_z_mean = nn.Sequential(
+            nn.Linear(h_dim, self.z_size),
+        )
         q_z_var = nn.Sequential(
             nn.Linear(h_dim, self.z_size),
             nn.Softplus(),
@@ -101,8 +106,6 @@ class SylvesterableVAE(nn.Module):
         return q_z_nn, q_z_mean, q_z_var
 
     def create_decoder(self):
-        h_dim = 32
-
         '''
         self.decode = nn.Sequential(
             nn.Conv2d(z_dim, 128, 1),
@@ -133,7 +136,7 @@ class SylvesterableVAE(nn.Module):
         )
         '''
         p_x_nn = nn.Sequential(
-            nn.Conv2d(z_dim, 128, 1),
+            nn.Conv2d(self.z_size, 128, 1),
             nn.ReLU(True),
             nn.ConvTranspose2d(128, 64, 4),
             nn.ReLU(True),
@@ -145,10 +148,10 @@ class SylvesterableVAE(nn.Module):
             nn.ReLU(True),
         )
 
-        # no final convpolution layer
+        # no final convolution layer
         p_x_mean = nn.Sequential(
             nn.ConvTranspose2d(32, 1, 4, 2, 1),
-            nn.Sigmoid()
+            # nn.Sigmoid()
         )
         return p_x_nn, p_x_mean
 
@@ -165,7 +168,7 @@ class SylvesterableVAE(nn.Module):
 
         return z
 
-    def encode(self, x):
+    def __encode__(self, x):
         """
         Encoder expects following data shapes as input: shape = (batch_size, num_channels, width, height)
         """
@@ -173,35 +176,55 @@ class SylvesterableVAE(nn.Module):
         h = self.q_z_nn(x)
         h = h.view(h.size(0), -1)
         mean = self.q_z_mean(h)
-        var = self.q_z_var(h)
-
+        var = self.q_z_var(h)    
+        
         return mean, var
+
+    def encode(self, x):
+        mean, var = self.__encode__(x)
+        return torch.cat([mean, var], dim=1)
 
     def decode(self, z):
         """
         Decoder outputs reconstructed image in the following shapes:
         x_mean.shape = (batch_size, num_channels, width, height)
         """
-
         z = z.view(z.size(0), self.z_size, 1, 1)
         h = self.p_x_nn(z)
         x_mean = self.p_x_mean(h)
 
         return x_mean
 
-    def forward(self, x):
+    def forward(self, x, no_dec=False):
         """
         Evaluates the model as a whole, encodes and decodes. Note that the log det jacobian is zero
          for a plain VAE (without flows), and z_0 = z_k.
         """
 
         # mean and variance of z
-        z_mu, z_var = self.encode(x)
+        z_mu, z_var = self.__encode__(x)
         # sample z
         z = self.reparameterize(z_mu, z_var)
         x_mean = self.decode(z)
+        # x_recon, mu, logvar, z
 
-        return x_mean, z_mu, z_var, self.log_det_j, z, z
+        if no_dec:
+            return z.squeeze()
+        else:
+            return x_mean, z_mu, z_var, z.squeeze()
+        # return x_mean, z_mu, z_var, self.log_det_j, z, z
+        # return x_mean, z_mu, z_var, self.log_det_j, z, z
+
+    # from FVAE
+    def weight_init(self, mode='normal'):
+        if mode == 'kaiming':
+            initializer = kaiming_init
+        elif mode == 'normal':
+            initializer = normal_init
+
+        for block in self._modules:
+            for m in self._modules[block]:
+                initializer(m)
 
 class FactorVAE1(nn.Module):
     """Encoder and Decoder architecture for 2D Shapes data."""
@@ -385,9 +408,8 @@ class FactorVAE3(nn.Module):
             x_recon = self.decode(z)
             return x_recon, mu, logvar, z.squeeze()
 
-
 def kaiming_init(m):
-    if isinstance(m, (nn.Linear, nn.Conv2d)):
+    if isinstance(m, (nn.Linear, nn.Conv2d, nn.ConvTranspose2d)):
         init.kaiming_normal_(m.weight)
         if m.bias is not None:
             m.bias.data.fill_(0)
@@ -398,7 +420,7 @@ def kaiming_init(m):
 
 
 def normal_init(m):
-    if isinstance(m, (nn.Linear, nn.Conv2d)):
+    if isinstance(m, (nn.Linear, nn.Conv2d, nn.ConvTranspose2d)):
         init.normal_(m.weight, 0, 0.02)
         if m.bias is not None:
             m.bias.data.fill_(0)
