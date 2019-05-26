@@ -1,12 +1,14 @@
 """model.py"""
 
 from torch.autograd import Variable
-from sylvester_models import flows
+from models import flows 
+# TODO: change models
 
 import torch.cuda as cuda
 import torch.nn as nn
 import torch.nn.init as init
 
+import torch
 
 class Discriminator(nn.Module):
     def __init__(self, z_dim):
@@ -60,7 +62,7 @@ class SylvesterableVAE1(nn.Module):
         self.q_z_nn, self.q_z_mean, self.q_z_var = self.create_encoder()
         self.p_x_nn, self.p_x_mean = self.create_decoder()
 
-        self.q_z_nn_output_dim = 256
+        self.q_z_nn_output_dim = 128
 
         if cuda.is_available():
             self.FloatTensor = cuda.FloatTensor
@@ -319,7 +321,7 @@ class OrthogonalSylvesterVAE1(SylvesterableVAE1):
             test = torch.bmm(amat.transpose(2, 1), amat) - self._eye
             norms2 = torch.sum(torch.norm(test, p=2, dim=2) ** 2, dim=1)
             norms = torch.sqrt(norms2)
-            max_norm = torch.max(norms).data[0]
+            max_norm = torch.max(norms).item()
             if max_norm <= self.cond:
                 break
 
@@ -375,7 +377,7 @@ class OrthogonalSylvesterVAE1(SylvesterableVAE1):
         mean_z, var_z, r1, r2, q, b = self.__encode__(x)
         return torch.cat(mean_z, var_z, 1)
 
-    def forward(self, x):
+    def forward(self, x, no_dec=False):
         """
         Forward pass with orthogonal sylvester flows for the transformation z_0 -> z_1 -> ... -> z_k.
         Log determinant is computed as log_det_j = N E_q_z0[\sum_k log |det dz_k/dz_k-1| ].
@@ -402,7 +404,11 @@ class OrthogonalSylvesterVAE1(SylvesterableVAE1):
 
         x_mean = self.decode(z[-1])
 
-        return x_mean, z_mu, z_var, self.log_det_j, z[0], z[-1]
+        # return x_mean, z_mu, z_var, self.log_det_j, z[0], z[-1]
+        if no_dec:
+            return z[0]
+        else:
+            return x_mean, z_mu, z_var, z[0]
 
 class FactorVAE1(nn.Module):
     """Encoder and Decoder architecture for 2D Shapes data."""
