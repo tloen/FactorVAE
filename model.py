@@ -375,8 +375,8 @@ class OrthogonalSylvesterVAE1(SylvesterableVAE1):
 
     def encode(self, x):
         mean_z, var_z, r1, r2, q, b = self.__encode__(x)
-        return torch.cat(mean_z, var_z, 1)
-
+        return torch.cat([mean_z, var_z], 1)
+        
     def forward(self, x, no_dec=False):
         """
         Forward pass with orthogonal sylvester flows for the transformation z_0 -> z_1 -> ... -> z_k.
@@ -408,7 +408,7 @@ class OrthogonalSylvesterVAE1(SylvesterableVAE1):
         if no_dec:
             return z[0]
         else:
-            return x_mean, z_mu, z_var, z[0]
+            return x_mean, z_mu, z_var, z[0], self.log_det_j
 
 class FactorVAE1(nn.Module):
     """Encoder and Decoder architecture for 2D Shapes data."""

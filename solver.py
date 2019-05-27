@@ -44,8 +44,10 @@ class Solver(object):
         self.beta1_D = args.beta1_D
         self.beta2_D = args.beta2_D
 
-        if args.dataset == 'dsprites':
-            if args.sylvester:
+        self.sylvester = args.sylvester
+
+        if self.dataset == 'dsprites':
+            if self.sylvester:
                 self.VAE = OrthogonalSylvesterVAE1(z_size=self.z_dim).to(self.device)
             else:
                 self.VAE = FactorVAE1(self.z_dim).to(self.device)
@@ -102,14 +104,22 @@ class Solver(object):
                 self.pbar.update(1)
 
                 x_true1 = x_true1.to(self.device)
-                x_recon, mu, logvar, z = self.VAE(x_true1)
-                vae_recon_loss = recon_loss(x_true1, x_recon)
+                # in future, set log_det_j universally to 0 if dne
+                if self.sylvester:
+                    x_recon, mu, logvar, z, log_det_j = self.VAE(x_true1)
+                    log_det_j = log_det_j.mean()
+                else:               
+                    x_recon, mu, logvar, z = self.VAE(x_true1)
+                    log_det_j = 0
+                vae_recon_loss = recon_loss(x_true1, x_recon) - log_det_j
                 vae_kld = kl_divergence(mu, logvar)
 
                 D_z = self.D(z)
                 vae_tc_loss = (D_z[:, :1] - D_z[:, 1:]).mean()
 
                 vae_loss = vae_recon_loss + vae_kld + self.gamma*vae_tc_loss
+                if torch.isnan(vae_loss).sum():
+                    raise ValueError()
 
                 self.optim_VAE.zero_grad()
                 vae_loss.backward(retain_graph=True)
